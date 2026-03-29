@@ -1,0 +1,33 @@
+sonarqube:
+  endpoint: https://sonarqube.example.com
+  manager:
+    username: sonarqube-manager
+    token: ${SONARQUBE_MANAGER_TOKEN}
+
+  temp_resources:
+    - plugin_name: tektoncd
+      group:
+        name: test-tektoncd-${TASK_RUN_ID}
+        description: "Temporary group for tektoncd testing"
+      user:
+        login: test-tektoncd-${TASK_RUN_ID}
+        name: "Tektoncd Test User"
+        email: "test-tektoncd-${TASK_RUN_ID}@example.com"
+        password: "${TEMP_USER_PASSWORD}"  # Use environment variable, never hardcode passwords
+        groups:
+          - test-tektoncd-${TASK_RUN_ID}
+      global_permissions:
+        - "scan"
+        - "provisioning"
+      projects:
+        - key: tektoncd-pipeline-${TASK_RUN_ID}
+          name: "Tektoncd Pipeline Test"
+          visibility: private
+      permission_template:
+        name: tektoncd-template-${TASK_RUN_ID}
+        description: "Temporary template for tektoncd projects"
+        project_key_pattern: "tektoncd-.*-${TASK_RUN_ID}"
+        permissions:
+          - user
+          - codeviewer
+          - scan
