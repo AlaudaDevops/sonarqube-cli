@@ -1,0 +1,4 @@
+sonarqube-cli
+sonarqube-cli-*
+*.test
+*.out
