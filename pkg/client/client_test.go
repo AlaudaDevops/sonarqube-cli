@@ -121,3 +121,52 @@ func TestClient_GenerateUserTokenDoesNotRevokeExistingToken(t *testing.T) {
 		t.Fatalf("GenerateUserToken() revokeCalls = %d, want 0", revokeCalls)
 	}
 }
+
+func TestClient_DoRequestReturnsStructuredAPIError(t *testing.T) {
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	c := New(server.URL, "test-token")
+
+	mux.HandleFunc("/api/projects/delete", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"errors":[{"msg":"Project not found"}]}`)
+	})
+
+	_, err := c.doRequest("POST", "/api/projects/delete", nil, nil)
+	if err == nil {
+		t.Fatal("doRequest() error = nil, want APIError")
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("doRequest() error = %T, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("apiErr.StatusCode = %d, want %d", apiErr.StatusCode, http.StatusNotFound)
+	}
+	if apiErr.URL != server.URL+"/api/projects/delete" {
+		t.Fatalf("apiErr.URL = %q, want masked request URL", apiErr.URL)
+	}
+	if apiErr.Body == "" {
+		t.Fatal("apiErr.Body = empty, want response body")
+	}
+}
+
+func TestClient_RevokeUserTokenIgnores404ByStatusCode(t *testing.T) {
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	c := New(server.URL, "test-token")
+
+	mux.HandleFunc("/api/user_tokens/revoke", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"errors":[{"msg":"Token missing without mentioning numeric code"}]}`)
+	})
+
+	if err := c.RevokeUserToken("user", "missing-token"); err != nil {
+		t.Fatalf("RevokeUserToken() error = %v, want nil", err)
+	}
+}

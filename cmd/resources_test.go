@@ -12,6 +12,7 @@ import (
 
 	sqclient "github.com/tektoncd/operator/tools/sonarqube-cli/pkg/client"
 	"github.com/tektoncd/operator/tools/sonarqube-cli/pkg/config"
+	"gopkg.in/yaml.v3"
 )
 
 func TestRunCreate_RequiresTokenFileBeforeAPICalls(t *testing.T) {
@@ -138,6 +139,256 @@ func TestValidateCreateOutputTargets_RejectsExistingPaths(t *testing.T) {
 				t.Fatalf("validateCreateOutputTargets() error = %v, want %s already exists", err, tc.flag)
 			}
 		})
+	}
+}
+
+func TestValidateCreateOutputTargets_RejectsDuplicatePaths(t *testing.T) {
+	dir := t.TempDir()
+	sharedPath := filepath.Join(dir, "shared.out")
+
+	err := validateCreateOutputTargets(
+		outputTarget{flag: "--state-file", path: sharedPath},
+		outputTarget{flag: "--token-file", path: sharedPath},
+	)
+	if err == nil {
+		t.Fatal("validateCreateOutputTargets() error = nil, want duplicate path validation error")
+	}
+	if !strings.Contains(err.Error(), "--token-file path") || !strings.Contains(err.Error(), "--state-file") {
+		t.Fatalf("validateCreateOutputTargets() error = %v, want duplicate path details", err)
+	}
+}
+
+func TestResolveTaskRunID_PrefersFlagOverEnv(t *testing.T) {
+	t.Setenv("TASK_RUN_ID", "env-task")
+
+	if got := resolveTaskRunID("flag-task"); got != "flag-task" {
+		t.Fatalf("resolveTaskRunID() = %q, want %q", got, "flag-task")
+	}
+}
+
+func TestResolveTaskRunID_UsesEnvWhenFlagEmpty(t *testing.T) {
+	t.Setenv("TASK_RUN_ID", "env-task")
+
+	if got := resolveTaskRunID(""); got != "env-task" {
+		t.Fatalf("resolveTaskRunID() = %q, want %q", got, "env-task")
+	}
+}
+
+func TestResolveTempResourceForOutput_ReplacesTemplates(t *testing.T) {
+	res := resolveTempResourceForOutput(config.TempResource{
+		PluginName: "${PLUGIN_NAME}",
+		Group: config.Group{
+			Name:        "group-${TASK_RUN_ID}",
+			Description: "group for ${PLUGIN_NAME}",
+		},
+		User: config.User{
+			Login:    "user-${TASK_RUN_ID}",
+			Name:     "User ${PLUGIN_NAME}",
+			Email:    "user-${TASK_RUN_ID}@example.com",
+			Password: "${TEMP_USER_PASSWORD}",
+			Groups:   []string{"${PLUGIN_NAME}-group"},
+		},
+		Projects: []config.Project{
+			{Key: "${PLUGIN_NAME}-${TASK_RUN_ID}", Name: "Project ${PLUGIN_NAME}"},
+		},
+		PermissionTemplate: config.PermissionTemplate{
+			Name:              "template-${TASK_RUN_ID}",
+			Description:       "Template ${PLUGIN_NAME}",
+			ProjectKeyPattern: "${PLUGIN_NAME}-${TASK_RUN_ID}.*",
+		},
+	}, "task-1", "tektoncd", true)
+
+	if res.PluginName != "tektoncd" {
+		t.Fatalf("PluginName = %q, want tektoncd", res.PluginName)
+	}
+	if res.Group.Name != "group-task-1" {
+		t.Fatalf("Group.Name = %q, want group-task-1", res.Group.Name)
+	}
+	if res.User.Login != "user-task-1" {
+		t.Fatalf("User.Login = %q, want user-task-1", res.User.Login)
+	}
+	if res.Projects[0].Key != "tektoncd-task-1" {
+		t.Fatalf("Projects[0].Key = %q, want tektoncd-task-1", res.Projects[0].Key)
+	}
+	if res.PermissionTemplate.ProjectKeyPattern != "tektoncd-task-1.*" {
+		t.Fatalf("PermissionTemplate.ProjectKeyPattern = %q, want tektoncd-task-1.*", res.PermissionTemplate.ProjectKeyPattern)
+	}
+	if res.User.Password != "${TEMP_USER_PASSWORD}" {
+		t.Fatalf("User.Password = %q, want secret placeholder preserved", res.User.Password)
+	}
+}
+
+func TestResolveTempResourceForOutput_PreservesUnknownPluginTemplates(t *testing.T) {
+	res := resolveTempResourceForOutput(config.TempResource{
+		PluginName: "${PLUGIN_NAME}",
+		Group: config.Group{
+			Name: "group-${PLUGIN_NAME}-${TASK_RUN_ID}",
+		},
+		User: config.User{
+			Login: "user-${PLUGIN_NAME}-${TASK_RUN_ID}",
+		},
+		Projects: []config.Project{
+			{Key: "${PLUGIN_NAME}-${TASK_RUN_ID}"},
+		},
+	}, "task-1", "tektoncd", false)
+
+	if res.PluginName != "${PLUGIN_NAME}" {
+		t.Fatalf("PluginName = %q, want placeholder preserved", res.PluginName)
+	}
+	if res.Group.Name != "group-${PLUGIN_NAME}-task-1" {
+		t.Fatalf("Group.Name = %q, want plugin placeholder preserved with task run resolved", res.Group.Name)
+	}
+	if res.User.Login != "user-${PLUGIN_NAME}-task-1" {
+		t.Fatalf("User.Login = %q, want plugin placeholder preserved with task run resolved", res.User.Login)
+	}
+	if res.Projects[0].Key != "${PLUGIN_NAME}-task-1" {
+		t.Fatalf("Projects[0].Key = %q, want plugin placeholder preserved with task run resolved", res.Projects[0].Key)
+	}
+}
+
+func TestRunCreate_ResolvedConfigExpandsAllTempResources(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	tokenPath := filepath.Join(dir, "token.env")
+	statePath := filepath.Join(dir, "state.yaml")
+	resolvedPath := filepath.Join(dir, "resolved.yaml")
+
+	oldConfigFile := configFile
+	oldTaskRunID := taskRunID
+	oldPlugin := plugin
+	oldResolvedConfig := resolvedConfig
+	oldTokenFile := tokenFile
+	oldStateFile := stateFile
+	oldManagerTokenFile := managerTokenFile
+	oldTempUserPasswordFile := tempUserPasswordFile
+	t.Cleanup(func() {
+		configFile = oldConfigFile
+		taskRunID = oldTaskRunID
+		plugin = oldPlugin
+		resolvedConfig = oldResolvedConfig
+		tokenFile = oldTokenFile
+		stateFile = oldStateFile
+		managerTokenFile = oldManagerTokenFile
+		tempUserPasswordFile = oldTempUserPasswordFile
+	})
+
+	cfgData := `sonarqube:
+  endpoint: https://sonarqube.example.com
+  manager:
+    username: manager
+    token: manager-token
+  temp_resources:
+    - plugin_name: ${PLUGIN_NAME}
+      group:
+        name: templated-${TASK_RUN_ID}
+        description: templated group
+      user:
+        login: user-${TASK_RUN_ID}
+        name: Test User
+        email: user-${TASK_RUN_ID}@example.com
+        password: static-password
+        groups:
+          - ${PLUGIN_NAME}-group
+      projects:
+        - key: project-${TASK_RUN_ID}
+          name: Project ${PLUGIN_NAME}
+      permission_template:
+        name: template-${TASK_RUN_ID}
+        description: Template ${PLUGIN_NAME}
+        project_key_pattern: project-${TASK_RUN_ID}.*
+        permissions:
+          - user
+    - plugin_name: static
+      group:
+        name: ${PLUGIN_NAME}-${TASK_RUN_ID}
+        description: static group
+      user:
+        login: ${PLUGIN_NAME}-user-${TASK_RUN_ID}
+        name: Static User
+        email: static@example.com
+        password: static-password
+        groups:
+          - static-group
+      projects:
+        - key: static-project-${TASK_RUN_ID}
+          name: Static Project
+      permission_template:
+        name: static-template-${TASK_RUN_ID}
+        description: Static Template
+        project_key_pattern: static-project-${TASK_RUN_ID}.*
+        permissions:
+          - user
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgData), 0600); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	configFile = cfgPath
+	taskRunID = "task-1"
+	plugin = "tektoncd"
+	resolvedConfig = resolvedPath
+	tokenFile = tokenPath
+	stateFile = statePath
+	managerTokenFile = ""
+	tempUserPasswordFile = ""
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v2/authorizations/groups", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+	mux.HandleFunc("/api/users/create", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/user_groups/add_user", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/permissions/create_template", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/permissions/add_group_to_template", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/projects/create", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/user_tokens/generate", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"token":"generated-token"}`)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	t.Setenv("SONARQUBE_ALLOW_HTTP", "true")
+	if err := os.WriteFile(cfgPath, []byte(strings.Replace(cfgData, "https://sonarqube.example.com", server.URL, 1)), 0600); err != nil {
+		t.Fatalf("WriteFile(updated config) error = %v", err)
+	}
+
+	if err := runCreate(createCmd, nil); err != nil {
+		t.Fatalf("runCreate() error = %v", err)
+	}
+
+	data, err := os.ReadFile(resolvedPath)
+	if err != nil {
+		t.Fatalf("ReadFile(resolved config) error = %v", err)
+	}
+
+	var resolved config.Config
+	if err := yaml.Unmarshal(data, &resolved); err != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v", err)
+	}
+
+	if resolved.SonarQube.TempResources[0].Group.Name != "templated-task-1" {
+		t.Fatalf("resolved first resource group = %q, want templated-task-1", resolved.SonarQube.TempResources[0].Group.Name)
+	}
+	if resolved.SonarQube.TempResources[1].Group.Name != "static-task-1" {
+		t.Fatalf("resolved second resource group = %q, want static-task-1", resolved.SonarQube.TempResources[1].Group.Name)
+	}
+	if resolved.SonarQube.TempResources[1].User.Login != "static-user-task-1" {
+		t.Fatalf("resolved second resource user login = %q, want static-user-task-1", resolved.SonarQube.TempResources[1].User.Login)
+	}
+	if resolved.SonarQube.TempResources[1].Group.Name == "tektoncd-task-1" {
+		t.Fatalf("resolved second resource group = %q, want static plugin context instead of selected plugin", resolved.SonarQube.TempResources[1].Group.Name)
 	}
 }
 

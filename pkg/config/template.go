@@ -11,6 +11,7 @@ import (
 // ReplaceVariables replaces template variables (TASK_RUN_ID, PLUGIN_NAME) in a string.
 // It returns an error if a required variable is missing in the template string.
 func ReplaceVariables(s, taskRunID, pluginName string) (string, error) {
+	// Fail only when the template actually references a missing variable, so plain strings still work without both inputs.
 	if taskRunID == "" && (strings.Contains(s, "{{TASK_RUN_ID}}") || strings.Contains(s, "${TASK_RUN_ID}")) {
 		return "", fmt.Errorf("taskRunID is required for template: %s", s)
 	}

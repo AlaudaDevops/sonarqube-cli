@@ -1,8 +1,8 @@
 package client
 
 import (
+	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/tektoncd/operator/tools/sonarqube-cli/pkg/config"
 )
@@ -12,8 +12,8 @@ func (c *Client) AddGlobalPermission(login, permission string) error {
 	params := url.Values{}
 	params.Set("login", login)
 	params.Set("permission", permission)
-	if err := c.doRequest("POST", "/api/permissions/add_user", params, nil); err != nil {
-		if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "already been granted") {
+	if _, err := c.doRequest("POST", "/api/permissions/add_user", params, nil); err != nil {
+		if bodyContains(err, "already exists", "already been granted") {
 			return alreadyExistsError("global permission", permission, err)
 		}
 		return err
@@ -27,8 +27,8 @@ func (c *Client) CreateProject(proj config.Project) (bool, error) {
 	params.Set("project", proj.Key)
 	params.Set("name", proj.Name)
 	params.Set("visibility", proj.Visibility)
-	if err := c.doRequest("POST", "/api/projects/create", params, nil); err != nil {
-		if strings.Contains(err.Error(), "already exists") {
+	if _, err := c.doRequest("POST", "/api/projects/create", params, nil); err != nil {
+		if bodyContains(err, "already exists") {
 			return false, alreadyExistsError("project", proj.Key, err)
 		}
 		return false, err
@@ -40,8 +40,8 @@ func (c *Client) CreateProject(proj config.Project) (bool, error) {
 func (c *Client) DeleteProject(key string) error {
 	params := url.Values{}
 	params.Set("project", key)
-	if err := c.doRequest("POST", "/api/projects/delete", params, nil); err != nil {
-		if strings.Contains(err.Error(), "404") {
+	if _, err := c.doRequest("POST", "/api/projects/delete", params, nil); err != nil {
+		if hasStatus(err, http.StatusNotFound) {
 			return nil
 		}
 		return err

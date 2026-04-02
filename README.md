@@ -28,6 +28,8 @@ sonarqube-cli resources create \
   --config config.yaml \
   --task-run-id abc123 \
   --plugin tektoncd \
+  --manager-token-file /secure/manager.token \
+  --temp-user-password-file /secure/temp-user.password \
   --token-file /tmp/sonarqube.env \
   --state-file /tmp/sonarqube.state.yaml
 ```
@@ -43,10 +45,12 @@ Token written to /tmp/sonarqube.env
 sonarqube-cli resources cleanup \
   --config config.yaml \
   --plugin tektoncd \
+  --manager-token-file /secure/manager.token \
   --state-file /tmp/sonarqube.state.yaml
 ```
 
 `--state-file` 必须来自同一 SonarQube 实例上的 `resources create`，并会在 cleanup 成功后自动删除。
+`--manager-token-file` 和 `--temp-user-password-file` 优先于环境变量，适合在 CI 中避免通过进程环境传递敏感信息。
 
 ### 细粒度命令
 
@@ -55,7 +59,7 @@ sonarqube-cli resources cleanup \
 ```bash
 sonarqube-cli project delete \
   --endpoint https://sonarqube.example.com \
-  --token <manager-token> \
+  --manager-token-file /secure/manager.token \
   --key tektoncd-pipeline-abc123
 ```
 
@@ -64,7 +68,7 @@ sonarqube-cli project delete \
 ```bash
 sonarqube-cli user delete \
   --endpoint https://sonarqube.example.com \
-  --token <manager-token> \
+  --manager-token-file /secure/manager.token \
   --login test-tektoncd-abc123
 ```
 
@@ -73,7 +77,7 @@ sonarqube-cli user delete \
 ```bash
 sonarqube-cli group delete \
   --endpoint https://sonarqube.example.com \
-  --token <manager-token> \
+  --manager-token-file /secure/manager.token \
   --name test-tektoncd-abc123
 ```
 
@@ -82,7 +86,7 @@ sonarqube-cli group delete \
 ```bash
 sonarqube-cli token revoke \
   --endpoint https://sonarqube.example.com \
-  --token <manager-token> \
+  --manager-token-file /secure/manager.token \
   --login test-tektoncd-abc123 \
   --name test-token-abc123
 ```
@@ -94,7 +98,8 @@ sonarqube-cli token revoke \
 支持环境变量和模板变量替换：
 - `{{TASK_RUN_ID}}` 或 `${TASK_RUN_ID}` - Tekton TaskRun ID
 - `{{PLUGIN_NAME}}` 或 `${PLUGIN_NAME}` - 插件名称
-- `${SONARQUBE_MANAGER_TOKEN}` - 管理员 Token（环境变量）
+- `${SONARQUBE_MANAGER_TOKEN}` - 管理员 Token（环境变量，或通过 `--manager-token-file` 覆盖）
+- `${TEMP_USER_PASSWORD}` - 临时测试用户密码（环境变量，或通过 `--temp-user-password-file` 覆盖）
 
 ## 在 Tekton Pipeline 中使用
 
@@ -104,6 +109,8 @@ sonarqube-cli resources create \
   --config config.yaml \
   --task-run-id ${TEKTON_TASK_RUN_ID} \
   --plugin tektoncd \
+  --manager-token-file /workspace/secrets/manager.token \
+  --temp-user-password-file /workspace/secrets/temp-user.password \
   --token-file /workspace/sonarqube.env \
   --state-file /workspace/sonarqube.state.yaml
 
@@ -119,5 +126,6 @@ sonar-scanner \
 # 扫描完成后清理；使用 create 生成的状态文件，避免按模板配置盲删现有资源
 sonarqube-cli resources cleanup \
   --config config.yaml \
+  --manager-token-file /workspace/secrets/manager.token \
   --state-file /workspace/sonarqube.state.yaml
 ```

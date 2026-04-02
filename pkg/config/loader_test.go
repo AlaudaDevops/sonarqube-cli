@@ -62,6 +62,127 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestLoad_PreservesTaskRunIDTemplateWhenEnvSet(t *testing.T) {
+	t.Setenv("TASK_RUN_ID", "env-task")
+
+	content := `sonarqube:
+  endpoint: https://sonarqube.example.com
+  manager:
+    username: admin
+    token: test-token
+  temp_resources:
+    - plugin_name: tektoncd
+      group:
+        name: test-${TASK_RUN_ID}
+        description: Test group
+      user:
+        login: test-user-${TASK_RUN_ID}
+        name: Test User
+        email: test@example.com
+        password: password
+        groups:
+          - test-group
+      global_permissions:
+        - scan
+      projects:
+        - key: test-project-${TASK_RUN_ID}
+          name: Test Project
+          visibility: private
+      permission_template:
+        name: test-template-${TASK_RUN_ID}
+        description: Test template
+        project_key_pattern: "test-${TASK_RUN_ID}.*"
+        permissions:
+          - user
+`
+
+	tmpfile, err := os.CreateTemp("", "config-template-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpfile.Name())
+
+	if _, err := tmpfile.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	tmpfile.Close()
+
+	cfg, err := Load(tmpfile.Name())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	res := cfg.SonarQube.TempResources[0]
+	if res.Group.Name != "test-${TASK_RUN_ID}" {
+		t.Fatalf("group.name = %q, want template placeholder preserved", res.Group.Name)
+	}
+	if res.User.Login != "test-user-${TASK_RUN_ID}" {
+		t.Fatalf("user.login = %q, want template placeholder preserved", res.User.Login)
+	}
+	if res.Projects[0].Key != "test-project-${TASK_RUN_ID}" {
+		t.Fatalf("projects[0].key = %q, want template placeholder preserved", res.Projects[0].Key)
+	}
+}
+
+func TestLoadWithVariables_OverridesSecretPlaceholders(t *testing.T) {
+	content := `sonarqube:
+  endpoint: https://sonarqube.example.com
+  manager:
+    username: admin
+    token: ${SONARQUBE_MANAGER_TOKEN}
+  temp_resources:
+    - plugin_name: tektoncd
+      group:
+        name: test-group
+        description: Test group
+      user:
+        login: test-user
+        name: Test User
+        email: test@example.com
+        password: ${TEMP_USER_PASSWORD}
+        groups:
+          - test-group
+      global_permissions:
+        - scan
+      projects:
+        - key: test-project
+          name: Test Project
+          visibility: private
+      permission_template:
+        name: test-template
+        description: Test template
+        project_key_pattern: "test-.*"
+        permissions:
+          - user
+`
+
+	tmpfile, err := os.CreateTemp("", "config-overrides-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpfile.Name())
+
+	if _, err := tmpfile.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	tmpfile.Close()
+
+	cfg, err := LoadWithVariables(tmpfile.Name(), map[string]string{
+		"SONARQUBE_MANAGER_TOKEN": "file-token",
+		"TEMP_USER_PASSWORD":      "file-password",
+	})
+	if err != nil {
+		t.Fatalf("LoadWithVariables() error = %v", err)
+	}
+
+	if cfg.SonarQube.Manager.Token != "file-token" {
+		t.Fatalf("manager.token = %q, want file-token", cfg.SonarQube.Manager.Token)
+	}
+	if cfg.SonarQube.TempResources[0].User.Password != "file-password" {
+		t.Fatalf("user.password = %q, want file-password", cfg.SonarQube.TempResources[0].User.Password)
+	}
+}
+
 func TestValidate(t *testing.T) {
 	tests := []struct {
 		name     string

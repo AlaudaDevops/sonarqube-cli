@@ -41,7 +41,7 @@ func New(endpoint, token string) *Client {
 	}
 }
 
-func (c *Client) doRequest(method, path string, params url.Values, body interface{}) error {
+func (c *Client) doRequest(method, path string, params url.Values, body interface{}) ([]byte, error) {
 	u := c.endpoint + path
 	var bodyReader io.Reader
 	contentType := ""
@@ -50,7 +50,7 @@ func (c *Client) doRequest(method, path string, params url.Values, body interfac
 		// JSON body (typically for v2 APIs)
 		jsonData, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		bodyReader = bytes.NewBuffer(jsonData)
 		contentType = "application/json"
@@ -69,7 +69,7 @@ func (c *Client) doRequest(method, path string, params url.Values, body interfac
 
 	req, err := http.NewRequest(method, u, bodyReader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if contentType != "" {
@@ -79,20 +79,27 @@ func (c *Client) doRequest(method, path string, params url.Values, body interfac
 	req.SetBasicAuth(c.token, "") // SonarQube API uses token as username with empty password
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		bodyData, _ := io.ReadAll(resp.Body)
-		// Mask query params in the URL for security in error logs
-		safeURL := c.endpoint + path
-		return fmt.Errorf("api error %d on %s %s: %s", resp.StatusCode, method, safeURL, string(bodyData))
+	bodyData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
 	}
 
-	// Read and discard body to enable connection reuse
-	io.Copy(io.Discard, resp.Body)
-	return nil
+	if resp.StatusCode >= 400 {
+		// Mask query params in the URL for security in error logs
+		safeURL := c.endpoint + path
+		return nil, &APIError{
+			StatusCode: resp.StatusCode,
+			Method:     method,
+			URL:        safeURL,
+			Body:       string(bodyData),
+		}
+	}
+
+	return bodyData, nil
 }
 
 // CreateGroup creates a new user group in SonarQube.
@@ -102,9 +109,9 @@ func (c *Client) CreateGroup(name, description string) (bool, error) {
 		"name":        name,
 		"description": description,
 	}
-	if err := c.doRequest("POST", path, nil, body); err != nil {
+	if _, err := c.doRequest("POST", path, nil, body); err != nil {
 		// 409 Conflict means group already exists in v2 API
-		if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "409") {
+		if hasStatus(err, http.StatusConflict) || bodyContains(err, "already exists") {
 			return false, alreadyExistsError("group", name, err)
 		}
 		return false, err
@@ -116,8 +123,8 @@ func (c *Client) CreateGroup(name, description string) (bool, error) {
 func (c *Client) DeleteGroup(name string) error {
 	// v2 API uses DELETE method and path parameter
 	path := fmt.Sprintf("/api/v2/authorizations/groups/%s", url.PathEscape(name))
-	if err := c.doRequest("DELETE", path, nil, nil); err != nil {
-		if strings.Contains(err.Error(), "404") {
+	if _, err := c.doRequest("DELETE", path, nil, nil); err != nil {
+		if hasStatus(err, http.StatusNotFound) {
 			return nil
 		}
 		return err
@@ -134,8 +141,8 @@ func (c *Client) CreateUser(user config.User) (bool, error) {
 	params.Set("email", user.Email)
 	params.Set("password", user.Password)
 	// Use v1 API for users as v2 might not be available
-	if err := c.doRequest("POST", "/api/users/create", params, nil); err != nil {
-		if strings.Contains(err.Error(), "already exists") {
+	if _, err := c.doRequest("POST", "/api/users/create", params, nil); err != nil {
+		if bodyContains(err, "already exists") {
 			return false, alreadyExistsError("user", user.Login, err)
 		}
 		return false, err
@@ -146,7 +153,8 @@ func (c *Client) CreateUser(user config.User) (bool, error) {
 		params := url.Values{}
 		params.Set("login", user.Login)
 		params.Set("name", group)
-		if err := c.doRequest("POST", "/api/user_groups/add_user", params, nil); err != nil {
+		if _, err := c.doRequest("POST", "/api/user_groups/add_user", params, nil); err != nil {
+			// Return created=true here so callers can roll back the user even when only group assignment failed.
 			return created, err
 		}
 	}
@@ -158,8 +166,8 @@ func (c *Client) DeleteUser(login string) error {
 	params := url.Values{}
 	params.Set("login", login)
 	// Use v1 API (deactivate) for users
-	if err := c.doRequest("POST", "/api/users/deactivate", params, nil); err != nil {
-		if strings.Contains(err.Error(), "404") {
+	if _, err := c.doRequest("POST", "/api/users/deactivate", params, nil); err != nil {
+		if hasStatus(err, http.StatusNotFound) {
 			return nil
 		}
 		return err
